@@ -408,8 +408,12 @@ std::string SDNode::getOperationName(const SelectionDAG *G) const {
   case ISD::STORE:                      return "store";
   case ISD::MLOAD:                      return "masked_load";
   case ISD::MSTORE:                     return "masked_store";
+  case ISD::MPREFETCH:
+    return "masked_prefetch";
   case ISD::MGATHER:                    return "masked_gather";
   case ISD::MSCATTER:                   return "masked_scatter";
+  case ISD::MGATHER_PF:
+    return "masked_gather_prefetch";
   case ISD::VAARG:                      return "vaarg";
   case ISD::VACOPY:                     return "vacopy";
   case ISD::VAEND:                      return "vaend";
@@ -795,6 +799,12 @@ void SDNode::print_details(raw_ostream &OS, const SelectionDAG *G) const {
       OS << ", compressing";
 
     OS << ">";
+  } else if (const MaskedPrefetchSDNode *MPf =
+                 dyn_cast<MaskedPrefetchSDNode>(this)) {
+    OS << "<";
+    printMemOperand(OS, *MPf->getMemOperand(), G);
+
+    OS << ">";
   } else if (const auto *MGather = dyn_cast<MaskedGatherSDNode>(this)) {
     OS << "<";
     printMemOperand(OS, *MGather->getMemOperand(), G);
@@ -826,12 +836,21 @@ void SDNode::print_details(raw_ostream &OS, const SelectionDAG *G) const {
     OS << ", " << Signed << " " << Scaled << " offset";
 
     OS << ">";
+  } else if (const auto *MGatherPf = dyn_cast<MaskedGatherPfSDNode>(this)) {
+    OS << "<";
+    printMemOperand(OS, *MGatherPf->getMemOperand(), G);
+
+    auto Signed = MGatherPf->isIndexSigned() ? "signed" : "unsigned";
+    auto Scaled = MGatherPf->isIndexScaled() ? "scaled" : "unscaled";
+    OS << ", " << Signed << " " << Scaled << " offset";
+
+    OS << ">";
   } else if (const MemSDNode *M = dyn_cast<MemSDNode>(this)) {
     OS << "<";
     printMemOperand(OS, *M->getMemOperand(), G);
     OS << ">";
   } else if (const BlockAddressSDNode *BA =
-               dyn_cast<BlockAddressSDNode>(this)) {
+                 dyn_cast<BlockAddressSDNode>(this)) {
     int64_t offset = BA->getOffset();
     OS << "<";
     BA->getBlockAddress()->getFunction()->printAsOperand(OS, false);
@@ -845,7 +864,7 @@ void SDNode::print_details(raw_ostream &OS, const SelectionDAG *G) const {
     if (unsigned int TF = BA->getTargetFlags())
       OS << " [TF=" << TF << ']';
   } else if (const AddrSpaceCastSDNode *ASC =
-               dyn_cast<AddrSpaceCastSDNode>(this)) {
+                 dyn_cast<AddrSpaceCastSDNode>(this)) {
     OS << '['
        << ASC->getSrcAddressSpace()
        << " -> "

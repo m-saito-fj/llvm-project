@@ -885,6 +885,14 @@ static void AddNodeIDCustom(FoldingSetNodeID &ID, const SDNode *N) {
     ID.AddInteger(MS->getMemOperand()->getFlags());
     break;
   }
+  case ISD::MGATHER_PF: {
+    const MaskedGatherPfSDNode *MG = cast<MaskedGatherPfSDNode>(N);
+    ID.AddInteger(MG->getMemoryVT().getRawBits());
+    ID.AddInteger(MG->getRawSubclassData());
+    ID.AddInteger(MG->getPointerInfo().getAddrSpace());
+    ID.AddInteger(MG->getMemOperand()->getFlags());
+    break;
+  }
   case ISD::ATOMIC_CMP_SWAP:
   case ISD::ATOMIC_CMP_SWAP_WITH_SUCCESS:
   case ISD::ATOMIC_SWAP:
@@ -9550,6 +9558,85 @@ SDValue SelectionDAG::getMaskedScatter(SDVTList VTs, EVT MemVT, const SDLoc &dl,
   assert(isa<ConstantSDNode>(N->getScale()) &&
          N->getScale()->getAsAPIntVal().isPowerOf2() &&
          "Scale should be a constant power of 2");
+
+  CSEMap.InsertNode(N, IP);
+  InsertNode(N);
+  SDValue V(N, 0);
+  NewSDValueDbgMsg(V, "Creating new node: ", this);
+  return V;
+}
+
+SDValue SelectionDAG::getMaskedPrefetch(SDVTList VTs, EVT MemVT,
+                                        const SDLoc &dl, ArrayRef<SDValue> Ops,
+                                        MachineMemOperand *MMO) {
+  assert(Ops.size() == 7 && "Incompatible number of operands");
+
+  FoldingSetNodeID ID;
+  AddNodeIDNode(ID, ISD::MPREFETCH, VTs, Ops);
+  ID.AddInteger(MemVT.getRawBits());
+  ID.AddInteger(getSyntheticNodeSubclassData<MaskedPrefetchSDNode>(
+      dl.getIROrder(), VTs, MemVT, MMO));
+  ID.AddInteger(MMO->getPointerInfo().getAddrSpace());
+  ID.AddInteger(MMO->getFlags());
+  void *IP = nullptr;
+  if (SDNode *E = FindNodeOrInsertPos(ID, dl, IP)) {
+    cast<MaskedPrefetchSDNode>(E)->refineAlignment(MMO);
+    return SDValue(E, 0);
+  }
+
+  auto *N = newSDNode<MaskedPrefetchSDNode>(dl.getIROrder(), dl.getDebugLoc(),
+                                            VTs, MemVT, MMO);
+  createOperands(N, Ops);
+
+  assert(isa<ConstantSDNode>(N->getRW()) &&
+         cast<ConstantSDNode>(N->getRW())->getAPIntValue().slt(2U) &&
+         "RW should be a constant less than 2. (0: Read, 1: Write)");
+  assert(isa<ConstantSDNode>(N->getLocality()) &&
+         cast<ConstantSDNode>(N->getLocality())->getAPIntValue().slt(4U) &&
+         "Locality should be a constant less than 4");
+
+  CSEMap.InsertNode(N, IP);
+  InsertNode(N);
+  SDValue V(N, 0);
+  NewSDValueDbgMsg(V, "Creating new node: ", this);
+  return V;
+}
+SDValue SelectionDAG::getMaskedGatherPrefetch(SDVTList VTs, EVT MemVT,
+                                              const SDLoc &dl,
+                                              ArrayRef<SDValue> Ops,
+                                              MachineMemOperand *MMO,
+                                              ISD::MemIndexType IndexType) {
+  assert(Ops.size() == 8 && "Incompatible number of operands");
+
+  FoldingSetNodeID ID;
+  AddNodeIDNode(ID, ISD::MGATHER_PF, VTs, Ops);
+  ID.AddInteger(MemVT.getRawBits());
+  ID.AddInteger(getSyntheticNodeSubclassData<MaskedGatherPfSDNode>(
+      dl.getIROrder(), VTs, MemVT, MMO, IndexType));
+  ID.AddInteger(MMO->getPointerInfo().getAddrSpace());
+  ID.AddInteger(MMO->getFlags());
+  void *IP = nullptr;
+  if (SDNode *E = FindNodeOrInsertPos(ID, dl, IP)) {
+    cast<MaskedGatherPfSDNode>(E)->refineAlignment(MMO);
+    return SDValue(E, 0);
+  }
+
+  auto *N = newSDNode<MaskedGatherPfSDNode>(dl.getIROrder(), dl.getDebugLoc(),
+                                            VTs, MemVT, MMO, IndexType);
+  createOperands(N, Ops);
+
+  assert(N->getMask().getValueType().getVectorElementCount() ==
+             N->getIndex().getValueType().getVectorElementCount() &&
+         "Vector width mismatch between mask and index");
+  assert(isa<ConstantSDNode>(N->getScale()) &&
+         cast<ConstantSDNode>(N->getScale())->getAPIntValue().isPowerOf2() &&
+         "Scale should be a constant power of 2");
+  assert(isa<ConstantSDNode>(N->getRW()) &&
+         cast<ConstantSDNode>(N->getRW())->getAPIntValue().slt(2U) &&
+         "RW should be a constant less than 2. (0: Read, 1: Write)");
+  assert(isa<ConstantSDNode>(N->getLocality()) &&
+         cast<ConstantSDNode>(N->getLocality())->getAPIntValue().sle(4U) &&
+         "Locality should be a constant less than 4");
 
   CSEMap.InsertNode(N, IP);
   InsertNode(N);

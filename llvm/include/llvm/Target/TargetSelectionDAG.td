@@ -256,6 +256,11 @@ def SDTMaskedLoad: SDTypeProfile<1, 4, [       // masked load
   SDTCisSameNumEltsAs<0, 3>
 ]>;
 
+def SDTMaskedPrefetch: SDTypeProfile<0, 6, [       // masked prefetch
+  SDTCisInt<0>, SDTCisPtrTy<1>, SDTCisPtrTy<2>, SDTCisVec<3>, SDTCisInt<4>,
+  SDTCisInt<5>
+]>;
+
 def SDTMaskedGather : SDTypeProfile<1, 4, [
   SDTCisVec<0>, SDTCisSameAs<0, 1>, SDTCisVec<2>, SDTCisPtrTy<3>, SDTCisVec<4>,
   SDTCisSameNumEltsAs<0, 2>, SDTCisSameNumEltsAs<0, 4>
@@ -264,6 +269,11 @@ def SDTMaskedGather : SDTypeProfile<1, 4, [
 def SDTMaskedScatter : SDTypeProfile<0, 4, [
   SDTCisVec<0>, SDTCisVec<1>, SDTCisPtrTy<2>, SDTCisVec<3>,
   SDTCisSameNumEltsAs<0, 1>, SDTCisSameNumEltsAs<0, 3>
+]>;
+
+def SDTMaskedGatherPrefetch: SDTypeProfile<0, 7, [
+  SDTCisInt<0>, SDTCisVec<1>, SDTCisPtrTy<2>, SDTCisVec<3>, SDTCisInt<4>,
+  SDTCisInt<5>, SDTCisInt<6>, SDTCisSameNumEltsAs<1, 3>
 ]>;
 
 def SDTVecShuffle : SDTypeProfile<1, 2, [
@@ -717,12 +727,18 @@ def masked_st    : SDNode<"ISD::MSTORE",  SDTMaskedStore,
                        [SDNPHasChain, SDNPMayStore, SDNPMemOperand]>;
 def masked_ld    : SDNode<"ISD::MLOAD",  SDTMaskedLoad,
                        [SDNPHasChain, SDNPMayLoad, SDNPMemOperand]>;
+def masked_pf    : SDNode<"ISD::MPREFETCH",  SDTMaskedPrefetch,
+                       [SDNPHasChain, SDNPMayLoad, SDNPMayStore, SDNPMemOperand]>;
 
 def masked_gather : SDNode<"ISD::MGATHER", SDTMaskedGather,
                            [SDNPHasChain, SDNPMayLoad, SDNPMemOperand]>;
 
 def masked_scatter : SDNode<"ISD::MSCATTER", SDTMaskedScatter,
                             [SDNPHasChain, SDNPMayStore, SDNPMemOperand]>;
+
+def masked_gather_pf : SDNode<"ISD::MGATHER_PF", SDTMaskedGatherPrefetch,
+                              [SDNPHasChain, SDNPMayLoad, SDNPMayStore,
+                               SDNPMemOperand]>;
 
 // Do not use ld, st directly. Use load, extload, sextload, zextload, store,
 // and truncst (see below).

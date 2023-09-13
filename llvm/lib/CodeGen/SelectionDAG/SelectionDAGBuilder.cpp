@@ -4825,6 +4825,101 @@ void SelectionDAGBuilder::visitMaskedGather(const CallInst &I) {
   setValue(&I, Gather);
 }
 
+void SelectionDAGBuilder::visitMaskedPrefetch(const CallInst &I) {
+  SDLoc sdl = getCurSDLoc();
+
+  // @llvm.masked.prefetch.*(Ptr, ElemSize, RW, Locality, Mask)
+  const Value *PtrOperand = I.getArgOperand(0);
+  SDValue Ptr = getValue(PtrOperand);
+  SDValue ElemSize = getValue(I.getArgOperand(1));
+  SDValue RW = getValue(I.getArgOperand(2));
+  SDValue Locality = getValue(I.getArgOperand(3));
+  SDValue Mask = getValue(I.getArgOperand(4));
+  SDValue Offset = DAG.getUNDEF(Ptr.getValueType());
+
+  // Generate pseudo-alignment form element size
+  Align Alignment =
+      cast<ConstantInt>(I.getArgOperand(1))->getMaybeAlignValue().valueOrOne();
+  EVT EltVT = EVT::getIntegerVT(*DAG.getContext(), Alignment.value() * 8);
+  EVT VT = EVT::getVectorVT(*DAG.getContext(), EltVT,
+                            Mask.getValueType().getVectorElementCount());
+
+  AAMDNodes AAInfo = I.getAAMetadata();
+  const MDNode *Ranges = I.getMetadata(LLVMContext::MD_range);
+
+  MachineMemOperand *MMO = DAG.getMachineFunction().getMachineMemOperand(
+      MachinePointerInfo(PtrOperand), MachineMemOperand::MOLoad,
+      MemoryLocation::UnknownSize, Alignment, AAInfo, Ranges);
+
+  SDValue Root = DAG.getRoot();
+  SDValue Ops[] = {Root, ElemSize, Ptr, Offset, Mask, RW, Locality};
+  SDValue MPrefetch =
+      DAG.getMaskedPrefetch(DAG.getVTList(MVT::Other), VT, sdl, Ops, MMO);
+
+  PendingLoads.push_back(MPrefetch);
+  setValue(&I, MPrefetch);
+  MPrefetch = getRoot();
+  DAG.setRoot(MPrefetch);
+}
+
+void SelectionDAGBuilder::visitMaskedGatherPrefetch(const CallInst &I) {
+  SDLoc sdl = getCurSDLoc();
+
+  // @llvm.masked.gather.prefetch.*(Ptrs, ElemSize, RW, Locality, Mask)
+  const Value *Ptr = I.getArgOperand(0);
+  SDValue ElemSize = getValue(I.getArgOperand(1));
+  SDValue RW = getValue(I.getArgOperand(2));
+  SDValue Locality = getValue(I.getArgOperand(3));
+  SDValue Mask = getValue(I.getArgOperand(4));
+
+  const TargetLowering &TLI = DAG.getTargetLoweringInfo();
+  // Generate pseudo-alignment form element size
+  Align Alignment =
+      cast<ConstantInt>(I.getArgOperand(1))->getMaybeAlignValue().valueOrOne();
+  EVT ElemVT = EVT::getIntegerVT(*DAG.getContext(), Alignment.value() * 8);
+  EVT VT = Mask.getValueType().changeVectorElementType(ElemVT);
+
+  const MDNode *Ranges = I.getMetadata(LLVMContext::MD_range);
+
+  SDValue Root = DAG.getRoot();
+  SDValue Base;
+  SDValue Index;
+  ISD::MemIndexType IndexType;
+  SDValue Scale;
+  bool UniformBase = getUniformBase(Ptr, Base, Index, IndexType, Scale, this,
+                                    I.getParent(), VT.getScalarStoreSize());
+  unsigned AS = Ptr->getType()->getScalarType()->getPointerAddressSpace();
+  MachineMemOperand *MMO = DAG.getMachineFunction().getMachineMemOperand(
+      MachinePointerInfo(AS), MachineMemOperand::MOLoad,
+      // TODO: Make MachineMemOperands aware of scalable
+      // vectors.
+      MemoryLocation::UnknownSize, Alignment, I.getAAMetadata(), Ranges);
+
+  if (!UniformBase) {
+    Base = DAG.getConstant(0, sdl, TLI.getPointerTy(DAG.getDataLayout()));
+    Index = getValue(Ptr);
+    IndexType = ISD::SIGNED_SCALED;
+    Scale =
+        DAG.getTargetConstant(1, sdl, TLI.getPointerTy(DAG.getDataLayout()));
+  }
+
+  EVT IdxVT = Index.getValueType();
+  EVT EltTy = IdxVT.getVectorElementType();
+  if (TLI.shouldExtendGSIndex(IdxVT, EltTy)) {
+    EVT NewIdxVT = IdxVT.changeVectorElementType(EltTy);
+    Index = DAG.getNode(ISD::SIGN_EXTEND, sdl, NewIdxVT, Index);
+  }
+
+  SDValue Ops[] = {Root, ElemSize, Mask, Base, Index, Scale, RW, Locality};
+  SDValue GatherPf = DAG.getMaskedGatherPrefetch(DAG.getVTList(MVT::Other), VT,
+                                                 sdl, Ops, MMO, IndexType);
+
+  PendingLoads.push_back(GatherPf);
+  setValue(&I, GatherPf);
+  GatherPf = getRoot();
+  DAG.setRoot(GatherPf);
+}
+
 void SelectionDAGBuilder::visitAtomicCmpXchg(const AtomicCmpXchgInst &I) {
   SDLoc dl = getCurSDLoc();
   AtomicOrdering SuccessOrdering = I.getSuccessOrdering();
@@ -6442,6 +6537,12 @@ void SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I,
     return;
   case Intrinsic::masked_compressstore:
     visitMaskedStore(I, true /* IsCompressing */);
+    return;
+  case Intrinsic::masked_prefetch:
+    visitMaskedPrefetch(I);
+    return;
+  case Intrinsic::masked_gather_prefetch:
+    visitMaskedGatherPrefetch(I);
     return;
   case Intrinsic::powi:
     setValue(&I, ExpandPowI(sdl, getValue(I.getArgOperand(0)),

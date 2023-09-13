@@ -19,6 +19,7 @@
 
 #include "LegalizeTypes.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
+#include "llvm/CodeGen/SelectionDAGNodes.h"
 #include "llvm/CodeGen/StackMaps.h"
 #include "llvm/CodeGen/TargetLowering.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -26,6 +27,7 @@
 #include "llvm/Support/KnownBits.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
+#include <cstdint>
 using namespace llvm;
 
 #define DEBUG_TYPE "legalize-types"
@@ -1806,10 +1808,16 @@ bool DAGTypeLegalizer::PromoteIntegerOperand(SDNode *N, unsigned OpNo) {
                                                     OpNo); break;
   case ISD::MLOAD:        Res = PromoteIntOp_MLOAD(cast<MaskedLoadSDNode>(N),
                                                     OpNo); break;
+  case ISD::MPREFETCH:
+    Res = PromoteIntOp_MPREFETCH(cast<MaskedPrefetchSDNode>(N), OpNo);
+    break;
   case ISD::MGATHER:  Res = PromoteIntOp_MGATHER(cast<MaskedGatherSDNode>(N),
                                                  OpNo); break;
   case ISD::MSCATTER: Res = PromoteIntOp_MSCATTER(cast<MaskedScatterSDNode>(N),
                                                   OpNo); break;
+  case ISD::MGATHER_PF:
+    Res = PromoteIntOp_MGATHER_PF(cast<MaskedGatherPfSDNode>(N), OpNo);
+    break;
   case ISD::VP_TRUNCATE:
   case ISD::TRUNCATE:     Res = PromoteIntOp_TRUNCATE(N); break;
   case ISD::BF16_TO_FP:
@@ -2234,6 +2242,34 @@ SDValue DAGTypeLegalizer::PromoteIntOp_MLOAD(MaskedLoadSDNode *N,
   return SDValue();
 }
 
+SDValue DAGTypeLegalizer::PromoteIntOp_MPREFETCH(MaskedPrefetchSDNode *N,
+                                                 unsigned OpNo) {
+  SmallVector<SDValue, 7> NewOps(N->op_begin(), N->op_end());
+
+  if (OpNo == 4) {
+    // The Mask. Update in place.
+    SDValue Mask = N->getMask();
+    uint64_t ElemSizeVal =
+        cast<ConstantSDNode>(N->getElemSize())->getZExtValue();
+    EVT EltVT = EVT::getIntegerVT(*DAG.getContext(), ElemSizeVal << 3);
+    EVT DataVT = EVT::getVectorVT(*DAG.getContext(), EltVT,
+                                  Mask.getValueType().getVectorElementCount());
+    if (getTypeAction(DataVT) == TargetLowering::TypeSplitVector) {
+      SDValue Res = SplitVecOp_MPREFETCH(N, OpNo);
+      return Res;
+    }
+    Mask = PromoteTargetBoolean(Mask, DataVT);
+    NewOps[4] = Mask;
+  } else
+    NewOps[OpNo] = GetPromotedInteger(N->getOperand(OpNo));
+
+  SDNode *Res = DAG.UpdateNodeOperands(N, NewOps);
+  if (Res == N)
+    return SDValue(Res, 0);
+
+  return SDValue();
+}
+
 SDValue DAGTypeLegalizer::PromoteIntOp_MGATHER(MaskedGatherSDNode *N,
                                                unsigned OpNo) {
   SmallVector<SDValue, 5> NewOps(N->op_begin(), N->op_end());
@@ -2286,6 +2322,35 @@ SDValue DAGTypeLegalizer::PromoteIntOp_MSCATTER(MaskedScatterSDNode *N,
   return DAG.getMaskedScatter(DAG.getVTList(MVT::Other), N->getMemoryVT(),
                               SDLoc(N), NewOps, N->getMemOperand(),
                               N->getIndexType(), TruncateStore);
+}
+
+SDValue DAGTypeLegalizer::PromoteIntOp_MGATHER_PF(MaskedGatherPfSDNode *N,
+                                                  unsigned OpNo) {
+  SmallVector<SDValue, 8> NewOps(N->op_begin(), N->op_end());
+
+  if (OpNo == 2) {
+    // The Mask
+    EVT DataVT = N->getIndex()->getValueType(0);
+    if (getTypeAction(DataVT) == TargetLowering::TypeSplitVector) {
+      SDValue Res = SplitVecOp_GatherPf(N, OpNo);
+      return Res;
+    }
+    NewOps[OpNo] = PromoteTargetBoolean(N->getOperand(OpNo), DataVT);
+  } else if (OpNo == 4) {
+    // The Index
+    if (N->isIndexSigned())
+      // Need to sign extend the index since the bits will likely be used.
+      NewOps[OpNo] = SExtPromotedInteger(N->getOperand(OpNo));
+    else
+      NewOps[OpNo] = ZExtPromotedInteger(N->getOperand(OpNo));
+  } else
+    NewOps[OpNo] = GetPromotedInteger(N->getOperand(OpNo));
+
+  SDNode *Res = DAG.UpdateNodeOperands(N, NewOps);
+  if (Res == N)
+    return SDValue(Res, 0);
+
+  return SDValue();
 }
 
 SDValue DAGTypeLegalizer::PromoteIntOp_TRUNCATE(SDNode *N) {

@@ -1448,6 +1448,8 @@ public:
     case ISD::MSTORE:
     case ISD::MGATHER:
     case ISD::MSCATTER:
+    case ISD::MPREFETCH:
+    case ISD::MGATHER_PF:
     case ISD::VP_LOAD:
     case ISD::VP_STORE:
     case ISD::VP_GATHER:
@@ -2863,15 +2865,16 @@ public:
   // In the both nodes address is Op1, mask is Op2:
   // MaskedGatherSDNode  (Chain, passthru, mask, base, index, scale)
   // MaskedScatterSDNode (Chain, value, mask, base, index, scale)
-  // Mask is a vector of i1 elements
+  // MaskedGathterPfSDNode (Chain, align, mask, base, index, scale, rw,
+  // locality) Mask is a vector of i1 elements
   const SDValue &getBasePtr() const { return getOperand(3); }
   const SDValue &getIndex()   const { return getOperand(4); }
   const SDValue &getMask()    const { return getOperand(2); }
   const SDValue &getScale()   const { return getOperand(5); }
 
   static bool classof(const SDNode *N) {
-    return N->getOpcode() == ISD::MGATHER ||
-           N->getOpcode() == ISD::MSCATTER;
+    return N->getOpcode() == ISD::MGATHER || N->getOpcode() == ISD::MSCATTER ||
+           N->getOpcode() == ISD::MGATHER_PF;
   }
 };
 
@@ -2923,6 +2926,49 @@ public:
 
   static bool classof(const SDNode *N) {
     return N->getOpcode() == ISD::MSCATTER;
+  }
+};
+
+/// This class is used to represent an MGATHER_PF node
+///
+class MaskedPrefetchSDNode : public MemSDNode {
+public:
+  friend class SelectionDAG;
+
+  MaskedPrefetchSDNode(unsigned Order, const DebugLoc &dl, SDVTList VTs,
+                       EVT MemVT, MachineMemOperand *MMO)
+      : MemSDNode(ISD::MPREFETCH, Order, dl, VTs, MemVT, MMO) {}
+
+  const SDValue &getElemSize() const { return getOperand(1); }
+  const SDValue &getBasePtr() const { return getOperand(2); }
+  const SDValue &getOffset() const { return getOperand(3); }
+  const SDValue &getMask() const { return getOperand(4); }
+  const SDValue &getRW() const { return getOperand(5); }
+  const SDValue &getLocality() const { return getOperand(6); }
+
+  static bool classof(const SDNode *N) {
+    return N->getOpcode() == ISD::MPREFETCH;
+  }
+};
+
+/// This class is used to represent an MGATHER_PF node
+///
+class MaskedGatherPfSDNode : public MaskedGatherScatterSDNode {
+public:
+  friend class SelectionDAG;
+
+  MaskedGatherPfSDNode(unsigned Order, const DebugLoc &dl, SDVTList VTs,
+                       EVT MemVT, MachineMemOperand *MMO,
+                       ISD::MemIndexType IndexType)
+      : MaskedGatherScatterSDNode(ISD::MGATHER_PF, Order, dl, VTs, MemVT, MMO,
+                                  IndexType) {}
+
+  const SDValue &getElemSize() const { return getOperand(1); }
+  const SDValue &getRW() const { return getOperand(6); }
+  const SDValue &getLocality() const { return getOperand(7); }
+
+  static bool classof(const SDNode *N) {
+    return N->getOpcode() == ISD::MGATHER_PF;
   }
 };
 

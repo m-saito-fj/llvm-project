@@ -1284,6 +1284,7 @@ enum NodeType {
   // OutChain = MSTORE(Value, BasePtr, Mask)
   MLOAD,
   MSTORE,
+  MPREFETCH,
 
   // Masked gather and scatter - load and store operations for a vector of
   // random addresses with additional mask operand that prevents memory
@@ -1296,6 +1297,7 @@ enum NodeType {
   // due to type legalization. The extra elements are ignored.
   MGATHER,
   MSCATTER,
+  MGATHER_PF,
 
   /// This corresponds to the llvm.lifetime.* intrinsics. The first operand
   /// is the chain and the second operand is the alloca pointer.

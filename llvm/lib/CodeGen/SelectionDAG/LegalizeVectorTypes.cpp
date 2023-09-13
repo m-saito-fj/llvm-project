@@ -23,6 +23,7 @@
 #include "llvm/ADT/SmallBitVector.h"
 #include "llvm/Analysis/MemoryLocation.h"
 #include "llvm/Analysis/VectorUtils.h"
+#include "llvm/CodeGen/SelectionDAGNodes.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/TypeSize.h"
@@ -708,6 +709,9 @@ bool DAGTypeLegalizer::ScalarizeVectorOperand(SDNode *N, unsigned OpNo) {
   case ISD::STORE:
     Res = ScalarizeVecOp_STORE(cast<StoreSDNode>(N), OpNo);
     break;
+  case ISD::MPREFETCH:
+    Res = ScalarizeVecOp_MPREFETCH(cast<MaskedPrefetchSDNode>(N), OpNo);
+    break;
   case ISD::STRICT_FP_ROUND:
     Res = ScalarizeVecOp_STRICT_FP_ROUND(N, OpNo);
     break;
@@ -880,6 +884,27 @@ SDValue DAGTypeLegalizer::ScalarizeVecOp_STORE(StoreSDNode *N, unsigned OpNo){
                       N->getBasePtr(), N->getPointerInfo(),
                       N->getOriginalAlign(), N->getMemOperand()->getFlags(),
                       N->getAAInfo());
+}
+
+/// If the value to masked_prefetch is a vector that needs to be scalarized, it
+/// must be <1 x ty>. Just prefetch the element.
+SDValue DAGTypeLegalizer::ScalarizeVecOp_MPREFETCH(MaskedPrefetchSDNode *N,
+                                                   unsigned OpNo) {
+  assert(OpNo == 4 && "Do not know how to scalarize this operand!");
+  SDLoc dl(N);
+  LLVMContext *Context = DAG.getContext();
+
+  SDValue Ops[5];
+  Ops[0] = N->getChain();
+  Ops[1] = N->getBasePtr();
+  Ops[2] = N->getRW();
+  Ops[3] = N->getLocality();
+  Ops[4] = DAG.getConstant(0, dl, EVT::getIntegerVT(*Context, 64));
+  auto Flags = N->getMemOperand()->getFlags();
+  auto MPI = N->getMemOperand()->getPointerInfo();
+  return DAG.getMemIntrinsicNode(ISD::PREFETCH, dl, DAG.getVTList(MVT::Other),
+                                 Ops, EVT::getIntegerVT(*Context, 8), MPI,
+                                 /* align */ std::nullopt, Flags);
 }
 
 /// If the value to round is a vector that needs to be scalarized, it must be
@@ -2962,6 +2987,8 @@ bool DAGTypeLegalizer::SplitVectorOperand(SDNode *N, unsigned OpNo) {
   switch (N->getOpcode()) {
   default:
 #ifndef NDEBUG
+    dbgs() << "ISD::MGAHTER_PF = " << ISD::MGATHER_PF
+           << ", Opcode = " << N->getOpcode() << "\n";
     dbgs() << "SplitVectorOperand Op #" << OpNo << ": ";
     N->dump(&DAG);
     dbgs() << "\n";
@@ -2996,6 +3023,9 @@ bool DAGTypeLegalizer::SplitVectorOperand(SDNode *N, unsigned OpNo) {
   case ISD::MSTORE:
     Res = SplitVecOp_MSTORE(cast<MaskedStoreSDNode>(N), OpNo);
     break;
+  case ISD::MPREFETCH:
+    Res = SplitVecOp_MPREFETCH(cast<MaskedPrefetchSDNode>(N), OpNo);
+    break;
   case ISD::MSCATTER:
   case ISD::VP_SCATTER:
     Res = SplitVecOp_Scatter(cast<MemSDNode>(N), OpNo);
@@ -3003,6 +3033,9 @@ bool DAGTypeLegalizer::SplitVectorOperand(SDNode *N, unsigned OpNo) {
   case ISD::MGATHER:
   case ISD::VP_GATHER:
     Res = SplitVecOp_Gather(cast<MemSDNode>(N), OpNo);
+    break;
+  case ISD::MGATHER_PF:
+    Res = SplitVecOp_GatherPf(cast<MemSDNode>(N), OpNo);
     break;
   case ISD::VSELECT:
     Res = SplitVecOp_VSELECT(N, OpNo);
@@ -3431,6 +3464,121 @@ SDValue DAGTypeLegalizer::SplitVecOp_Gather(MemSDNode *N, unsigned OpNo) {
   SDValue Res = DAG.getNode(ISD::CONCAT_VECTORS, N, N->getValueType(0), Lo, Hi);
   ReplaceValueWith(SDValue(N, 0), Res);
   return SDValue();
+}
+
+SDValue DAGTypeLegalizer::SplitVecOp_MPREFETCH(MaskedPrefetchSDNode *N,
+                                               unsigned OpNo) {
+  SDValue Ch = N->getChain();
+  SDValue ElemSize = N->getElemSize();
+  SDValue Mask = N->getMask();
+  SDValue Ptr = N->getBasePtr();
+  SDValue Offset = N->getOffset();
+  SDValue RW = N->getRW();
+  SDValue Locality = N->getLocality();
+
+  EVT MemoryVT = N->getMemoryVT();
+  Align Alignment = N->getOriginalAlign();
+  SDLoc DL(N);
+  // Split all operands
+  EVT LoMemVT, HiMemVT;
+  std::tie(LoMemVT, HiMemVT) = DAG.GetSplitDestVTs(MemoryVT);
+
+  // Split Mask operand
+  SDValue MaskLo, MaskHi;
+  if (Mask.getOpcode() == ISD::SETCC) {
+    SplitVecRes_SETCC(Mask.getNode(), MaskLo, MaskHi);
+  } else {
+    std::tie(MaskLo, MaskHi) = SplitMask(Mask, DL);
+  }
+
+  SDValue Lo;
+  MachineMemOperand *MMO = DAG.getMachineFunction().getMachineMemOperand(
+      N->getPointerInfo(), MachineMemOperand::MOLoad,
+      MemoryLocation::UnknownSize, Alignment, N->getAAInfo(), N->getRanges());
+
+  SDValue OpsLo[] = {Ch, ElemSize, Ptr, Offset, MaskLo, RW, Locality};
+  Lo =
+      DAG.getMaskedPrefetch(DAG.getVTList(MVT::Other), LoMemVT, DL, OpsLo, MMO);
+
+  Ptr = TLI.IncrementMemoryAddress(Ptr, MaskLo, DL, LoMemVT, DAG, false);
+
+  MachinePointerInfo MPI;
+  if (LoMemVT.isScalableVector()) {
+    Alignment = commonAlignment(Alignment,
+                                LoMemVT.getSizeInBits().getKnownMinValue() / 8);
+    MPI = MachinePointerInfo(N->getPointerInfo().getAddrSpace());
+  } else
+    MPI = N->getPointerInfo().getWithOffset(
+        LoMemVT.getStoreSize().getFixedValue());
+
+  MMO = DAG.getMachineFunction().getMachineMemOperand(
+      MPI, MachineMemOperand::MOLoad, MemoryLocation::UnknownSize, Alignment,
+      N->getAAInfo(), N->getRanges());
+  // The order of the Scatter operation after split is well defined. The "Hi"
+  // part comes after the "Lo". So these two operations should be chained one
+  // after another.
+  SDValue OpsHi[] = {Lo, ElemSize, Ptr, Offset, MaskHi, RW, Locality};
+  return DAG.getMaskedPrefetch(DAG.getVTList(MVT::Other), HiMemVT, DL, OpsHi,
+                               MMO);
+}
+
+SDValue DAGTypeLegalizer::SplitVecOp_GatherPf(MemSDNode *N, unsigned OpNo) {
+  SDValue Ch = N->getChain();
+  EVT MemoryVT = N->getMemoryVT();
+  Align Alignment = N->getOriginalAlign();
+  SDLoc DL(N);
+  struct Operands {
+    SDValue ElemSize;
+    SDValue Mask;
+    SDValue Ptr;
+    SDValue Index;
+    SDValue Scale;
+    SDValue RW;
+    SDValue Locality;
+  } Ops = [&]() -> Operands {
+    auto *MGPF = dyn_cast<MaskedGatherPfSDNode>(N);
+    return {MGPF->getElemSize(), MGPF->getMask(),  MGPF->getBasePtr(),
+            MGPF->getIndex(),    MGPF->getScale(), MGPF->getRW(),
+            MGPF->getLocality()};
+  }();
+  // Split all operands
+
+  EVT LoMemVT, HiMemVT;
+  std::tie(LoMemVT, HiMemVT) = DAG.GetSplitDestVTs(MemoryVT);
+
+  // Split Mask operand
+  SDValue MaskLo, MaskHi;
+  if (Ops.Mask.getOpcode() == ISD::SETCC) {
+    SplitVecRes_SETCC(Ops.Mask.getNode(), MaskLo, MaskHi);
+  } else {
+    std::tie(MaskLo, MaskHi) = SplitMask(Ops.Mask, DL);
+  }
+
+  SDValue IndexHi, IndexLo;
+  if (getTypeAction(Ops.Index.getValueType()) ==
+      TargetLowering::TypeSplitVector)
+    GetSplitVector(Ops.Index, IndexLo, IndexHi);
+  else
+    std::tie(IndexLo, IndexHi) = DAG.SplitVector(Ops.Index, DL);
+
+  SDValue Lo;
+  MachineMemOperand *MMO = DAG.getMachineFunction().getMachineMemOperand(
+      N->getPointerInfo(), MachineMemOperand::MOStore,
+      MemoryLocation::UnknownSize, Alignment, N->getAAInfo(), N->getRanges());
+
+  auto *MGPF = dyn_cast<MaskedGatherPfSDNode>(N);
+  SDValue OpsLo[] = {Ch,      Ops.ElemSize, MaskLo, Ops.Ptr,
+                     IndexLo, Ops.Scale,    Ops.RW, Ops.Locality};
+  Lo = DAG.getMaskedGatherPrefetch(DAG.getVTList(MVT::Other), LoMemVT, DL,
+                                   OpsLo, MMO, MGPF->getIndexType());
+
+  // The order of the Scatter operation after split is well defined. The "Hi"
+  // part comes after the "Lo". So these two operations should be chained one
+  // after another.
+  SDValue OpsHi[] = {Lo,      Ops.ElemSize, MaskHi, Ops.Ptr,
+                     IndexHi, Ops.Scale,    Ops.RW, Ops.Locality};
+  return DAG.getMaskedGatherPrefetch(DAG.getVTList(MVT::Other), HiMemVT, DL,
+                                     OpsHi, MMO, MGPF->getIndexType());
 }
 
 SDValue DAGTypeLegalizer::SplitVecOp_VP_STORE(VPStoreSDNode *N, unsigned OpNo) {
