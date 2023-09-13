@@ -931,7 +931,8 @@ void VPlanTransforms::truncateToMinimalBitwidths(
                VPWidenSelectRecipe, VPWidenMemoryInstructionRecipe>(&R))
         continue;
       if (isa<VPWidenMemoryInstructionRecipe>(&R) &&
-          cast<VPWidenMemoryInstructionRecipe>(&R)->isStore())
+          (cast<VPWidenMemoryInstructionRecipe>(&R)->isStore() ||
+           cast<VPWidenMemoryInstructionRecipe>(&R)->isPrefetch()))
         continue;
 
       VPValue *ResultVPV = R.getVPSingleValue();

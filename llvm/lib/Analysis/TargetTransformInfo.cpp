@@ -452,6 +452,11 @@ bool TargetTransformInfo::isLegalMaskedLoad(Type *DataType,
   return TTIImpl->isLegalMaskedLoad(DataType, Alignment);
 }
 
+bool TargetTransformInfo::isLegalMaskedPrefetch(Type *DataType,
+                                                Align Alignment) const {
+  return TTIImpl->isLegalMaskedPrefetch(DataType, Alignment);
+}
+
 bool TargetTransformInfo::isLegalNTStore(Type *DataType,
                                          Align Alignment) const {
   return TTIImpl->isLegalNTStore(DataType, Alignment);
@@ -503,6 +508,11 @@ bool TargetTransformInfo::isLegalMaskedExpandLoad(Type *DataType) const {
 bool TargetTransformInfo::isLegalStridedLoadStore(Type *DataType,
                                                   Align Alignment) const {
   return TTIImpl->isLegalStridedLoadStore(DataType, Alignment);
+}
+
+bool TargetTransformInfo::isLegalMaskedGatherPrefetch(Type *DataType,
+                                                      Align Alignment) const {
+  return TTIImpl->isLegalMaskedGatherPrefetch(DataType, Alignment);
 }
 
 bool TargetTransformInfo::enableOrderedReductions() const {

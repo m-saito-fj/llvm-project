@@ -1607,6 +1607,16 @@ public:
       return thisT()->getGatherScatterOpCost(Instruction::Load, RetTy, Args[0],
                                              VarMask, Alignment, CostKind, I);
     }
+    case Intrinsic::masked_gather_prefetch: {
+      const Value *Mask = Args[4];
+      bool VarMask = !isa<Constant>(Mask);
+      Align Alignment = cast<ConstantInt>(Args[1])->getAlignValue();
+      auto *MaskVT = cast<VectorType>(Mask->getType());
+      auto *PsudoDataTy = MaskVT->getWithNewBitWidth(Alignment.value() * 8);
+      return thisT()->getGatherScatterOpCost(Instruction::Call, PsudoDataTy,
+                                             Args[0], VarMask, Alignment,
+                                             CostKind, I);
+    }
     case Intrinsic::experimental_vp_strided_store: {
       const Value *Data = Args[0];
       const Value *Ptr = Args[1];
@@ -2011,6 +2021,13 @@ public:
       Align TyAlign = thisT()->DL.getABITypeAlign(Ty);
       return thisT()->getMaskedMemoryOpCost(Instruction::Load, Ty, TyAlign, 0,
                                             CostKind);
+    }
+    case Intrinsic::masked_prefetch: {
+      auto *MaskVT = cast<VectorType>(ICA.getArgTypes()[4]);
+      Type *PsudoTy = MaskVT->getWithNewBitWidth(32);
+      Align TyAlign = thisT()->DL.getABITypeAlign(PsudoTy);
+      return thisT()->getMaskedMemoryOpCost(Instruction::Call, PsudoTy, TyAlign,
+                                            0, CostKind);
     }
     case Intrinsic::vector_reduce_add:
       return thisT()->getArithmeticReductionCost(Instruction::Add, VecOpTy,

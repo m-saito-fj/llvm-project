@@ -2240,7 +2240,9 @@ class VPWidenMemoryInstructionRecipe : public VPRecipeBase {
   }
 
   bool isMasked() const {
-    return isStore() ? getNumOperands() == 3 : getNumOperands() == 2;
+    return isPrefetch() ? getNumOperands() == 5
+           : isStore()  ? getNumOperands() == 3
+                        : getNumOperands() == 2;
   }
 
 public:
@@ -2258,6 +2260,14 @@ public:
                                  bool Consecutive, bool Reverse)
       : VPRecipeBase(VPDef::VPWidenMemoryInstructionSC, {Addr, StoredValue}),
         Ingredient(Store), Consecutive(Consecutive), Reverse(Reverse) {
+    assert((Consecutive || !Reverse) && "Reverse implies consecutive");
+    setMask(Mask);
+  }
+
+  VPWidenMemoryInstructionRecipe(PrefetchInst &Prefetch, VPValue *Addr,
+                                 VPValue *Mask, bool Consecutive, bool Reverse)
+      : VPRecipeBase(VPDef::VPWidenMemoryInstructionSC, {Addr}),
+        Ingredient(Prefetch), Consecutive(Consecutive), Reverse(Reverse) {
     assert((Consecutive || !Reverse) && "Reverse implies consecutive");
     setMask(Mask);
   }
@@ -2288,6 +2298,9 @@ public:
 
   /// Returns true if this recipe is a store.
   bool isStore() const { return isa<StoreInst>(Ingredient); }
+
+  /// Returns true if this recipe is a prefetch.
+  bool isPrefetch() const { return isa<PrefetchInst>(Ingredient); }
 
   /// Return the address accessed by this recipe.
   VPValue *getStoredValue() const {
