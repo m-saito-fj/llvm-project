@@ -795,6 +795,8 @@ AArch64TargetLowering::AArch64TargetLowering(const TargetMachine &TM,
     setOperationAction(ISD::STRICT_FP_EXTEND, VT, Legal);
 
   setOperationAction(ISD::PREFETCH, MVT::Other, Custom);
+  setOperationAction(ISD::MPREFETCH, MVT::Other, Custom);
+  setOperationAction(ISD::MGATHER_PF, MVT::Other, Custom);
 
   setOperationAction(ISD::GET_ROUNDING, MVT::i32, Custom);
   setOperationAction(ISD::SET_ROUNDING, MVT::Other, Custom);
@@ -1012,7 +1014,7 @@ AArch64TargetLowering::AArch64TargetLowering(const TargetMachine &TM,
                        ISD::INSERT_VECTOR_ELT, ISD::EXTRACT_VECTOR_ELT,
                        ISD::VECREDUCE_ADD, ISD::STEP_VECTOR});
 
-  setTargetDAGCombine({ISD::MGATHER, ISD::MSCATTER});
+  setTargetDAGCombine({ISD::MGATHER, ISD::MSCATTER, ISD::MGATHER_PF});
 
   setTargetDAGCombine(ISD::FP_EXTEND);
 
@@ -2552,6 +2554,13 @@ const char *AArch64TargetLowering::getTargetNodeName(unsigned Opcode) const {
     MAKE_CASE(AArch64ISD::TBNZ)
     MAKE_CASE(AArch64ISD::TC_RETURN)
     MAKE_CASE(AArch64ISD::PREFETCH)
+    MAKE_CASE(AArch64ISD::PRFM)
+    MAKE_CASE(AArch64ISD::PRFM_SXTW)
+    MAKE_CASE(AArch64ISD::PRFM_UXTW)
+    MAKE_CASE(AArch64ISD::PRFM_SXTW_EXT_SCALED)
+    MAKE_CASE(AArch64ISD::PRFM_UXTW_EXT_SCALED)
+    MAKE_CASE(AArch64ISD::PRFM_LSL_SCALED)
+    MAKE_CASE(AArch64ISD::PRFM_IMM)
     MAKE_CASE(AArch64ISD::SITOF)
     MAKE_CASE(AArch64ISD::UITOF)
     MAKE_CASE(AArch64ISD::NVCAST)
@@ -5807,6 +5816,165 @@ SDValue AArch64TargetLowering::LowerMSCATTER(SDValue Op,
   return Op;
 }
 
+static SDValue genSVEPrfOp(SDValue RW, SDValue Locality, SDLoc DL,
+                           SelectionDAG &DAG) {
+  uint64_t RWVal = cast<ConstantSDNode>(RW)->getZExtValue();
+  uint64_t LocalityVal = cast<ConstantSDNode>(Locality)->getZExtValue();
+
+  uint64_t IsStream = (LocalityVal == 0) ? 1 : 0;
+  uint64_t SVEPrfOp = (RWVal << 3) | ((3 - LocalityVal) << 1) | IsStream;
+  return DAG.getTargetConstant(SVEPrfOp, DL, MVT::i32);
+}
+
+SDValue AArch64TargetLowering::LowerMPREFETCH(SDValue Op,
+                                              SelectionDAG &DAG) const {
+  MaskedPrefetchSDNode *MPF = cast<MaskedPrefetchSDNode>(Op);
+
+  SDLoc DL(Op);
+  SDValue Chain = MPF->getChain();
+  SDValue ElemSize = MPF->getElemSize();
+  SDValue Mask = MPF->getMask();
+  SDValue BasePtr = MPF->getBasePtr();
+  SDValue Offset = MPF->getOffset();
+  SDValue RW = MPF->getRW();
+  SDValue Locality = MPF->getLocality();
+
+  uint64_t ElemSizeVal = cast<ConstantSDNode>(ElemSize)->getZExtValue();
+  EVT EltVT = EVT::getIntegerVT(*DAG.getContext(), ElemSizeVal << 3);
+  EVT VT = EVT::getVectorVT(*DAG.getContext(), EltVT,
+                            Mask.getValueType().getVectorElementCount());
+
+  if (useSVEForFixedLengthVectorVT(
+          VT,
+          /*OverrideNEON=*/Subtarget->useSVEForFixedLengthVectors())) {
+    EVT ContainerVT = getContainerForFixedLengthVector(DAG, VT);
+    Mask = DAG.getNode(ISD::SIGN_EXTEND, DL, VT, Mask);
+    Mask = convertFixedMaskToScalableVector(Mask, DAG);
+
+    // Emit equivalent scalable vector scatter.
+    SDValue Ops[] = {Chain, ElemSize, BasePtr, Offset, Mask, RW, Locality};
+    return DAG.getMaskedPrefetch(MPF->getVTList(), ContainerVT, DL, Ops,
+                                 MPF->getMemOperand());
+  }
+
+  SDValue SVEPrfOp = genSVEPrfOp(RW, Locality, DL, DAG);
+  SDValue Ptr = BasePtr;
+  if (!Offset->isUndef()) {
+    Ptr = DAG.getNode(ISD::ADD, DL, Ptr.getValueType(), BasePtr, Offset);
+  }
+
+  SDValue Ops[] = {Chain, Mask, Ptr, SVEPrfOp};
+  return DAG.getNode(AArch64ISD::PRFM, DL, MVT::Other, Ops);
+}
+
+SDValue AArch64TargetLowering::LowerMGATHER_PF(SDValue Op,
+                                               SelectionDAG &DAG) const {
+  MaskedGatherPfSDNode *MGPF = cast<MaskedGatherPfSDNode>(Op);
+
+  SDLoc DL(Op);
+  SDValue Chain = MGPF->getChain();
+  SDValue ElemSize = MGPF->getElemSize();
+  SDValue Mask = MGPF->getMask();
+  SDValue BasePtr = MGPF->getBasePtr();
+  SDValue Index = MGPF->getIndex();
+  SDValue Scale = MGPF->getScale();
+  SDValue RW = MGPF->getRW();
+  SDValue Locality = MGPF->getLocality();
+
+  uint64_t ElemSizeVal = cast<ConstantSDNode>(ElemSize)->getZExtValue();
+  EVT EltVT = EVT::getIntegerVT(*DAG.getContext(), ElemSizeVal << 3);
+  EVT VT = Mask->getValueType(0).changeVectorElementType(EltVT);
+  EVT MemVT = MGPF->getMemoryVT();
+  ISD::MemIndexType IndexType = MGPF->getIndexType();
+
+  bool IsScaled = MGPF->isIndexScaled();
+  bool IsSigned = MGPF->isIndexSigned();
+
+  // SVE supports an index scaled by sizeof(MemVT.elt) only, everything else
+  // must be calculated before hand.
+  uint64_t ScaleVal = cast<ConstantSDNode>(Scale)->getZExtValue();
+  if (IsScaled && ScaleVal != MemVT.getScalarStoreSize()) {
+    assert(isPowerOf2_64(ScaleVal) && "Expecting power-of-two types");
+    EVT IndexVT = Index.getValueType();
+    Index = DAG.getNode(ISD::SHL, DL, IndexVT, Index,
+                        DAG.getConstant(Log2_32(ScaleVal), DL, IndexVT));
+    Scale = DAG.getTargetConstant(1, DL, Scale.getValueType());
+
+    SDValue Ops[] = {Chain, ElemSize, Mask, BasePtr,
+                     Index, Scale,    RW,   Locality};
+    return DAG.getMaskedGatherPrefetch(MGPF->getVTList(), MemVT, DL, Ops,
+                                       MGPF->getMemOperand(), IndexType);
+  }
+
+  // Lower fixed length gather prefetch to a scalable equivalent.
+  if (MemVT.isFixedLengthVector()) {
+    assert(Subtarget->useSVEForFixedLengthVectors() &&
+           "Cannot lower when not using SVE for fixed vectors!");
+
+    // Find the smallest integer fixed length vector we can use for the gather
+    // prefetch.
+    EVT PromotedVT = VT.changeVectorElementType(MVT::i32);
+    if (Index.getValueType().getVectorElementType() == MVT::i64 ||
+        Mask.getValueType().getVectorElementType() == MVT::i64)
+      PromotedVT = VT.changeVectorElementType(MVT::i64);
+
+    // Promote vector operands.
+    unsigned ExtOpcode = IsSigned ? ISD::SIGN_EXTEND : ISD::ZERO_EXTEND;
+    Index = DAG.getNode(ExtOpcode, DL, PromotedVT, Index);
+    Mask = DAG.getNode(ISD::SIGN_EXTEND, DL, PromotedVT, Mask);
+
+    EVT ContainerVT = getContainerForFixedLengthVector(DAG, PromotedVT);
+
+    // Convert fixed length vector operands to scalable.
+    MemVT = ContainerVT.changeVectorElementType(MemVT.getVectorElementType());
+    Index = convertToScalableVector(DAG, ContainerVT, Index);
+    Mask = convertFixedMaskToScalableVector(Mask, DAG);
+
+    // Emit equivalent scalable vector scatter.
+    SDValue Ops[] = {Chain, ElemSize, Mask, BasePtr,
+                     Index, Scale,    RW,   Locality};
+    return DAG.getMaskedGatherPrefetch(MGPF->getVTList(), MemVT, DL, Ops,
+                                       MGPF->getMemOperand(), IndexType);
+  }
+
+  SDValue SVEPrfOp = genSVEPrfOp(RW, Locality, DL, DAG);
+  if (BasePtr.getOpcode() == ISD::Constant) {
+    // AArch64::PRFM_IMM
+    SDValue Base = DAG.getConstant(
+        cast<ConstantSDNode>(BasePtr)->getZExtValue(), DL, MVT::i64);
+    SDValue Ops[] = {Chain, Mask, Index, Base, SVEPrfOp, ElemSize};
+    return DAG.getNode(AArch64ISD::PRFM_IMM, DL, MVT::Other, Ops);
+  }
+  if (IsScaled && Index.getValueType().getVectorElementType() == MVT::i64) {
+    // AArch64::PRFM_LSL_SCALED
+    SDValue Ops[] = {Chain, Mask, BasePtr, Index, SVEPrfOp, ElemSize};
+    return DAG.getNode(AArch64ISD::PRFM_LSL_SCALED, DL, MVT::Other, Ops);
+  }
+  if (IsSigned && Index.getValueType().getVectorElementType() == MVT::i64) {
+    // AArch64::PRFM_SXTW_EXT_SCALED
+    SDValue Ops[] = {Chain, Mask, BasePtr, Index, SVEPrfOp, ElemSize};
+    return DAG.getNode(AArch64ISD::PRFM_SXTW_EXT_SCALED, DL, MVT::Other, Ops);
+  }
+  if (IsSigned && Index.getValueType().getVectorElementType() == MVT::i32) {
+    // AArch64::PRFM_SXTW
+    SDValue Ops[] = {Chain, Mask, BasePtr, Index, SVEPrfOp, ElemSize};
+    return DAG.getNode(AArch64ISD::PRFM_SXTW, DL, MVT::Other, Ops);
+  }
+  if (!IsSigned && Index.getValueType().getVectorElementType() == MVT::i64) {
+    // AArch64::PRFM_UXTW_EXT_SCALED
+    SDValue Ops[] = {Chain, Mask, BasePtr, Index, SVEPrfOp, ElemSize};
+    return DAG.getNode(AArch64ISD::PRFM_UXTW_EXT_SCALED, DL, MVT::Other, Ops);
+  }
+  if (!IsSigned && Index.getValueType().getVectorElementType() == MVT::i32) {
+    // AArch64::PRFM_UXTW
+    SDValue Ops[] = {Chain, Mask, BasePtr, Index, SVEPrfOp, ElemSize};
+    return DAG.getNode(AArch64ISD::PRFM_UXTW, DL, MVT::Other, Ops);
+  }
+
+  // Everything else is legal.
+  return Op;
+}
+
 SDValue AArch64TargetLowering::LowerMLOAD(SDValue Op, SelectionDAG &DAG) const {
   SDLoc DL(Op);
   MaskedLoadSDNode *LoadNode = cast<MaskedLoadSDNode>(Op);
@@ -6278,6 +6446,10 @@ SDValue AArch64TargetLowering::LowerOperation(SDValue Op,
     return LowerXOR(Op, DAG);
   case ISD::PREFETCH:
     return LowerPREFETCH(Op, DAG);
+  case ISD::MPREFETCH:
+    return LowerMPREFETCH(Op, DAG);
+  case ISD::MGATHER_PF:
+    return LowerMGATHER_PF(Op, DAG);
   case ISD::SINT_TO_FP:
   case ISD::UINT_TO_FP:
   case ISD::STRICT_SINT_TO_FP:
@@ -21973,6 +22145,16 @@ static SDValue performMaskedGatherScatterCombine(
         DAG.getVTList(N->getValueType(0), MVT::Other), MGT->getMemoryVT(), DL,
         Ops, MGT->getMemOperand(), IndexType, MGT->getExtensionType());
   }
+  if (auto *MGPF = dyn_cast<MaskedGatherPfSDNode>(MGS)) {
+    SDValue ElemSize = MGPF->getElemSize();
+    SDValue RW = MGPF->getRW();
+    SDValue Locality = MGPF->getLocality();
+    SDValue Ops[] = {Chain, ElemSize, Mask, BasePtr,
+                     Index, Scale,    RW,   Locality};
+    return DAG.getMaskedGatherPrefetch(DAG.getVTList(MVT::Other),
+                                       MGPF->getMemoryVT(), DL, Ops,
+                                       MGPF->getMemOperand(), IndexType);
+  }
   auto *MSC = cast<MaskedScatterSDNode>(MGS);
   SDValue Data = MSC->getValue();
   SDValue Ops[] = {Chain, Data, Mask, BasePtr, Index, Scale};
@@ -24155,6 +24337,7 @@ SDValue AArch64TargetLowering::PerformDAGCombine(SDNode *N,
     return performMSTORECombine(N, DCI, DAG, Subtarget);
   case ISD::MGATHER:
   case ISD::MSCATTER:
+  case ISD::MGATHER_PF:
     return performMaskedGatherScatterCombine(N, DCI, DAG);
   case ISD::VECTOR_SPLICE:
     return performSVESpliceCombine(N, DAG);

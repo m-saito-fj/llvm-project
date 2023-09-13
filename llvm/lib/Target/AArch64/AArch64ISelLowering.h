@@ -19,6 +19,7 @@
 #include "llvm/CodeGen/CallingConvLower.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/SelectionDAG.h"
+#include "llvm/CodeGen/SelectionDAGISel.h"
 #include "llvm/CodeGen/TargetLowering.h"
 #include "llvm/IR/CallingConv.h"
 #include "llvm/IR/Instruction.h"
@@ -299,6 +300,17 @@ enum NodeType : unsigned {
 
   // Custom prefetch handling
   PREFETCH,
+
+  // Custom contiguous prefetch handling
+  PRFM,
+
+  // Custom gather pfetch handling
+  PRFM_UXTW,
+  PRFM_SXTW,
+  PRFM_UXTW_EXT_SCALED,
+  PRFM_SXTW_EXT_SCALED,
+  PRFM_LSL_SCALED,
+  PRFM_IMM,
 
   // {s|u}int to FP within a FP register.
   SITOF,
@@ -1038,6 +1050,9 @@ private:
 
   SDValue LowerMGATHER(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerMSCATTER(SDValue Op, SelectionDAG &DAG) const;
+
+  SDValue LowerMPREFETCH(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerMGATHER_PF(SDValue Op, SelectionDAG &DAG) const;
 
   SDValue LowerMLOAD(SDValue Op, SelectionDAG &DAG) const;
 

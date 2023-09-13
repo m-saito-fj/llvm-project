@@ -137,6 +137,34 @@ def AArch64stnt1_scatter : SDNode<"AArch64ISD::SSTNT1_PRED", SDT_AArch64_SCATTER
 // Scatter vector base + scalar offset
 def AArch64st1q_scatter : SDNode<"AArch64ISD::SST1Q_PRED", SDT_AArch64_SCATTER_VS, [SDNPHasChain, SDNPMayStore]>;
 
+// Contiguous Prefetch - node definitions
+//
+def SDT_AArch64_PRFM : SDTypeProfile<0, 3, [
+  SDTCisVec<0>, SDTCisPtrTy<1>, SDTCisInt<2>,
+  SDTCVecEltisVT<0,i1>
+]>;
+
+def AArch64prfm : SDNode<"AArch64ISD::PRFM", SDT_AArch64_PRFM, [SDNPHasChain, SDNPSideEffect]>;
+
+// Gather Prefetch - node definitions
+//
+def SDT_AArch64_GATHER_PRFM_SV : SDTypeProfile<0, 5, [
+  SDTCisVec<0>, SDTCisPtrTy<1>, SDTCisVec<2>, SDTCisInt<3>, SDTCisInt<4>,
+  SDTCVecEltisVT<0,i1>
+]>;
+
+def SDT_AArch64_GATHER_PRFM_VS : SDTypeProfile<0, 5, [
+  SDTCisVec<0>, SDTCisVec<1>, SDTCisInt<2>, SDTCisInt<3>, SDTCisInt<4>,
+  SDTCVecEltisVT<0,i1>
+]>;
+
+def AArch64prfm_uxtw : SDNode<"AArch64ISD::PRFM_UXTW", SDT_AArch64_GATHER_PRFM_SV, [SDNPHasChain, SDNPSideEffect]>;
+def AArch64prfm_sxtw : SDNode<"AArch64ISD::PRFM_SXTW", SDT_AArch64_GATHER_PRFM_SV, [SDNPHasChain, SDNPSideEffect]>;
+def AArch64prfm_uxtw_ext_scaled : SDNode<"AArch64ISD::PRFM_UXTW_EXT_SCALED", SDT_AArch64_GATHER_PRFM_SV, [SDNPHasChain, SDNPSideEffect]>;
+def AArch64prfm_sxtw_ext_scaled : SDNode<"AArch64ISD::PRFM_SXTW_EXT_SCALED", SDT_AArch64_GATHER_PRFM_SV, [SDNPHasChain, SDNPSideEffect]>;
+def AArch64prfm_lsl_scaled : SDNode<"AArch64ISD::PRFM_LSL_SCALED", SDT_AArch64_GATHER_PRFM_SV, [SDNPHasChain, SDNPSideEffect]>;
+def AArch64prfm_imm : SDNode<"AArch64ISD::PRFM_IMM", SDT_AArch64_GATHER_PRFM_VS, [SDNPHasChain, SDNPSideEffect]>;
+
 // AArch64 SVE/SVE2 - the remaining node definitions
 //
 
@@ -1632,10 +1660,17 @@ let Predicates = [HasSVEorSME] in {
                        (RegImmInst sve_prfop:$prfop, PPR_3b:$gp, GPR64:$base, (i64 0))>;
   }
 
+  // for ACLE intrinsic
   defm : sve_prefetch<int_aarch64_sve_prf, nxv16i1, PRFB_PRI, PRFB_PRR, am_sve_regreg_lsl0>;
   defm : sve_prefetch<int_aarch64_sve_prf, nxv8i1,  PRFH_PRI, PRFH_PRR, am_sve_regreg_lsl1>;
   defm : sve_prefetch<int_aarch64_sve_prf, nxv4i1,  PRFW_PRI, PRFW_PRR, am_sve_regreg_lsl2>;
   defm : sve_prefetch<int_aarch64_sve_prf, nxv2i1,  PRFD_PRI, PRFD_PRR, am_sve_regreg_lsl3>;
+
+  // for SDNode
+  defm : sve_prefetch<AArch64prfm, nxv16i1, PRFB_PRI, PRFB_PRR, am_sve_regreg_lsl0>;
+  defm : sve_prefetch<AArch64prfm, nxv8i1,  PRFH_PRI, PRFH_PRR, am_sve_regreg_lsl1>;
+  defm : sve_prefetch<AArch64prfm, nxv4i1,  PRFW_PRI, PRFW_PRR, am_sve_regreg_lsl2>;
+  defm : sve_prefetch<AArch64prfm, nxv2i1,  PRFD_PRI, PRFD_PRR, am_sve_regreg_lsl3>;
 } // End HasSVEorSME
 
 let Predicates = [HasSVE] in {
@@ -1672,6 +1707,58 @@ let Predicates = [HasSVE] in {
   defm PRFH_D_PZI : sve_mem_64b_prfm_vi<0b01, "prfh", uimm5s2, int_aarch64_sve_prfh_gather_scalar_offset>;
   defm PRFW_D_PZI : sve_mem_64b_prfm_vi<0b10, "prfw", uimm5s4, int_aarch64_sve_prfw_gather_scalar_offset>;
   defm PRFD_D_PZI : sve_mem_64b_prfm_vi<0b11, "prfd", uimm5s8, int_aarch64_sve_prfd_gather_scalar_offset>;
+
+  multiclass sve_prfm_sv_scaled<string Inst, int ElemSize,
+                                SDPatternOperator prfm_sxtw, SDPatternOperator prfm_uxtw> {
+    // Gather prefetch using scaled 32-bit offsets
+    def : Pat<(prfm_sxtw (nxv4i1 PPR3bAny:$gp), GPR64:$base, (nxv4i32 ZPR32:$offs), (i32 sve_prfop:$prfop), (i32 ElemSize)),
+              (!cast<Instruction>(Inst # _S_SXTW_SCALED) sve_prfop:$prfop, PPR3bAny:$gp, GPR64:$base, ZPR:$offs)>;
+    def : Pat<(prfm_uxtw (nxv4i1 PPR3bAny:$gp), GPR64:$base, (nxv4i32 ZPR32:$offs), (i32 sve_prfop:$prfop), (i32 ElemSize)),
+              (!cast<Instruction>(Inst # _S_UXTW_SCALED) sve_prfop:$prfop, PPR3bAny:$gp, GPR64:$base, ZPR:$offs)>;
+  }
+
+  defm : sve_prfm_sv_scaled<"PRFB", 1, AArch64prfm_sxtw, AArch64prfm_uxtw>;
+  defm : sve_prfm_sv_scaled<"PRFH", 2, AArch64prfm_sxtw, AArch64prfm_uxtw>;
+  defm : sve_prfm_sv_scaled<"PRFW", 4, AArch64prfm_sxtw, AArch64prfm_uxtw>;
+  defm : sve_prfm_sv_scaled<"PRFD", 8, AArch64prfm_sxtw, AArch64prfm_uxtw>;
+
+  multiclass sve_prfm_sv_ext_scaled<string Inst, int ElemSize,
+                                    SDPatternOperator prfm_sxtw, SDPatternOperator prfm_uxtw> {
+    // Gather prefetch using unpacked, scaled 32-bit offsets, e.g.
+    def : Pat<(prfm_sxtw (nxv2i1 PPR3bAny:$gp), GPR64:$base, (nxv2i64 ZPR64:$offs), (i32 sve_prfop:$prfop), (i32 ElemSize)),
+              (!cast<Instruction>(Inst # _D_SXTW_SCALED) sve_prfop:$prfop, PPR3bAny:$gp, GPR64:$base, ZPR:$offs)>;
+    def : Pat<(prfm_uxtw (nxv2i1 PPR3bAny:$gp), GPR64:$base, (nxv2i64 ZPR64:$offs), (i32 sve_prfop:$prfop), (i32 ElemSize)),
+              (!cast<Instruction>(Inst # _D_UXTW_SCALED) sve_prfop:$prfop, PPR3bAny:$gp, GPR64:$base, ZPR:$offs)>;
+  }
+
+  defm : sve_prfm_sv_ext_scaled<"PRFB", 1, AArch64prfm_sxtw_ext_scaled, AArch64prfm_uxtw_ext_scaled>;
+  defm : sve_prfm_sv_ext_scaled<"PRFH", 2, AArch64prfm_sxtw_ext_scaled, AArch64prfm_uxtw_ext_scaled>;
+  defm : sve_prfm_sv_ext_scaled<"PRFW", 4, AArch64prfm_sxtw_ext_scaled, AArch64prfm_uxtw_ext_scaled>;
+  defm : sve_prfm_sv_ext_scaled<"PRFD", 8, AArch64prfm_sxtw_ext_scaled, AArch64prfm_uxtw_ext_scaled>;
+
+  multiclass sve_prfm_sv_lsl_scaled<string Inst, int ElemSize, SDPatternOperator prfm> {
+    // Gather prefetch using scaled 64-bit offsets, e.g.
+    def : Pat<(prfm (nxv2i1 PPR3bAny:$gp), GPR64:$base, (nxv2i64 ZPR64:$offs), (i32 sve_prfop:$prfop), (i32 ElemSize)),
+              (!cast<Instruction>(Inst # _D_SCALED) sve_prfop:$prfop, PPR3bAny:$gp, GPR64:$base, ZPR:$offs)>;
+  }
+
+  defm : sve_prfm_sv_lsl_scaled<"PRFB", 1, AArch64prfm_lsl_scaled>;
+  defm : sve_prfm_sv_lsl_scaled<"PRFH", 2, AArch64prfm_lsl_scaled>;
+  defm : sve_prfm_sv_lsl_scaled<"PRFW", 4, AArch64prfm_lsl_scaled>;
+  defm : sve_prfm_sv_lsl_scaled<"PRFD", 8, AArch64prfm_lsl_scaled>;
+
+  multiclass sve_prfm_vi_imm<string Inst, int ElemSize, Operand imm_ty, SDPatternOperator prfm> {
+  // Gather prefetch using 32/64-bit pointers with offset, e.g.
+    def : Pat<(prfm (nxv4i1 PPR3bAny:$gp), (nxv4i32 ZPR32:$Zn), (i64 imm_ty:$imm), (i32 sve_prfop:$prfop), (i32 ElemSize)),
+              (!cast<Instruction>(Inst # _S_PZI) sve_prfop:$prfop, PPR3bAny:$gp, ZPR32:$Zn, imm_ty:$imm)>;
+    def : Pat<(prfm (nxv2i1 PPR3bAny:$gp), (nxv2i64 ZPR32:$Zn), (i64 imm_ty:$imm), (i32 sve_prfop:$prfop), (i32 ElemSize)),
+              (!cast<Instruction>(Inst # _D_PZI) sve_prfop:$prfop, PPR3bAny:$gp, ZPR32:$Zn, imm_ty:$imm)>;
+  }
+
+  defm : sve_prfm_vi_imm<"PRFB", 1, imm0_31, AArch64prfm_imm>;
+  defm : sve_prfm_vi_imm<"PRFH", 2, uimm5s2, AArch64prfm_imm>;
+  defm : sve_prfm_vi_imm<"PRFW", 4, uimm5s4, AArch64prfm_imm>;
+  defm : sve_prfm_vi_imm<"PRFD", 8, uimm5s8, AArch64prfm_imm>;
 
   defm ADR_SXTW_ZZZ_D : sve_int_bin_cons_misc_0_a_sxtw<0b00, "adr">;
   defm ADR_UXTW_ZZZ_D : sve_int_bin_cons_misc_0_a_uxtw<0b01, "adr">;

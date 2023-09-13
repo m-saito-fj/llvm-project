@@ -275,6 +275,10 @@ public:
     return isLegalMaskedLoadStore(DataType, Alignment);
   }
 
+  bool isLegalMaskedPrefetch(Type *DataType, Align Alignment) {
+    return isLegalMaskedGatherPrefetch(DataType, Alignment);
+  }
+
   bool isLegalMaskedGatherScatter(Type *DataType) const {
     if (!ST->hasSVE() || !ST->isNeonAvailable())
       return false;
@@ -293,6 +297,9 @@ public:
   }
 
   bool isLegalMaskedScatter(Type *DataType, Align Alignment) const {
+    return isLegalMaskedGatherScatter(DataType);
+  }
+  bool isLegalMaskedGatherPrefetch(Type *DataType, Align Alignment) const {
     return isLegalMaskedGatherScatter(DataType);
   }
 

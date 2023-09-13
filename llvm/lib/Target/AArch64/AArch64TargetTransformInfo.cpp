@@ -3106,13 +3106,14 @@ InstructionCost AArch64TTIImpl::getGatherScatterOpCost(
   if (useNeonVector(DataTy) || !isLegalMaskedGatherScatter(DataTy))
     return BaseT::getGatherScatterOpCost(Opcode, DataTy, Ptr, VariableMask,
                                          Alignment, CostKind, I);
-  auto *VT = cast<VectorType>(DataTy);
+  auto *ElemTy = isa<VectorType>(DataTy)
+                     ? cast<VectorType>(DataTy)->getElementType()
+                     : DataTy;
   auto LT = getTypeLegalizationCost(DataTy);
   if (!LT.first.isValid())
     return InstructionCost::getInvalid();
 
-  if (!LT.second.isVector() ||
-      !isElementTypeLegalForScalableVector(VT->getElementType()))
+  if (!LT.second.isVector() || !isElementTypeLegalForScalableVector(ElemTy))
     return InstructionCost::getInvalid();
 
   // The code-generator is currently not able to handle scalable vectors
@@ -3125,7 +3126,7 @@ InstructionCost AArch64TTIImpl::getGatherScatterOpCost(
 
   ElementCount LegalVF = LT.second.getVectorElementCount();
   InstructionCost MemOpCost =
-      getMemoryOpCost(Opcode, VT->getElementType(), Alignment, 0, CostKind,
+      getMemoryOpCost(Opcode, ElemTy, Alignment, 0, CostKind,
                       {TTI::OK_AnyValue, TTI::OP_None}, I);
   // Add on an overhead cost for using gathers/scatters.
   // TODO: At the moment this is applied unilaterally for all CPUs, but at some
